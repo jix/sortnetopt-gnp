@@ -8,6 +8,8 @@ const MAX_VALUES: usize = 1 << MAX_CHANNELS;
 
 type VVec<T> = arrayvec::ArrayVec<[T; MAX_VALUES]>;
 
+type AVec<T> = arrayvec::ArrayVec<[T; 512]>; // >= MAX_CHANNELS * MAX_CHANNELS * 2
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct OutputSet {
     channels: usize,
@@ -107,11 +109,45 @@ impl OutputSet {
     pub fn is_sorted(&self) -> bool {
         self.values.iter().all(|&value| value & (value + 1) == 0)
     }
+
+    pub fn abstraction(&self) -> Abstraction {
+        let mut values = (0..self.channels * self.channels * 2)
+            .map(|_| 0)
+            .collect::<AVec<u16>>();
+
+        for &value in self.values.iter() {
+            let pop_count = value.count_ones() as usize;
+            for channel in 0..self.channels {
+                let mask = 1 << channel;
+                let channel_value = (value & mask != 0) as usize;
+
+                let channel_pop_count = pop_count - channel_value;
+
+                values[2 * (self.channels * channel + channel_pop_count) + channel_value] += 1;
+            }
+        }
+
+        Abstraction {
+            channels: self.channels,
+            values,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Abstraction {
+    channels: usize,
+    values: AVec<u16>,
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn avec_capacity() {
+        assert!(AVec::<usize>::new().capacity() >= MAX_CHANNELS * MAX_CHANNELS * 2);
+    }
 
     #[rustfmt::skip]
     static SORT_11: &[(usize, usize)] = &[
