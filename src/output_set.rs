@@ -132,6 +132,66 @@ impl OutputSet {
             values,
         }
     }
+
+    pub fn channel_weights(&self) -> CVec<u16> {
+        let mut weights = (0..self.channels).map(|_| 0).collect::<CVec<u16>>();
+
+        for &value in self.values.iter() {
+            for channel in 0..self.channels {
+                let mask = 1 << channel;
+                let channel_value = value & mask != 0;
+                weights[channel] += channel_value as u16;
+            }
+        }
+
+        weights
+    }
+
+    pub fn permute_channels(&mut self, perm: CVec<usize>) {
+        assert_eq!(perm.len(), self.channels);
+
+        let perm_masks = perm
+            .into_iter()
+            .rev()
+            .map(|j| 1u16 << j)
+            .collect::<CVec<_>>();
+
+        let mut mask_combined = 0;
+
+        for &mask_from in perm_masks.iter() {
+            mask_combined |= mask_from;
+        }
+
+        assert_eq!(mask_combined + 1, 1 << self.channels);
+
+        for value in self.values.iter_mut() {
+            let mut value_out = 0;
+            for mask_from in perm_masks.iter() {
+                value_out <<= 1;
+                value_out |= (*value & mask_from != 0) as u16;
+            }
+            *value = value_out;
+        }
+
+        self.values.sort_unstable();
+    }
+
+    pub fn order_channels_by_weight(&mut self) -> CVec<usize> {
+        let mut weights = self
+            .channel_weights()
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| (!w, i))
+            .collect::<CVec<_>>();
+
+        weights.sort_unstable();
+
+        let perm = weights.into_iter().map(|(_, i)| i).collect::<CVec<_>>();
+
+        self.permute_channels(perm.clone());
+
+        perm
+    }
 }
 
 #[derive(Debug)]
@@ -177,5 +237,54 @@ mod test {
 
         assert!(output_set.is_sorted());
         assert_eq!(output_set.values().len(), 12);
+    }
+
+    #[test]
+    fn sort_11_order_channels() {
+        crate::logging::setup();
+
+        let mut output_set = OutputSet::all_values(11);
+
+        for (i, &(a, b)) in SORT_11.iter().enumerate() {
+            assert!(!output_set.is_sorted());
+
+            let mut ordered_output_set = output_set.clone();
+
+            let channel_weights = output_set.channel_weights();
+
+            let perm = ordered_output_set.order_channels_by_weight();
+
+            log::info!("perm: {:?}", perm);
+
+            let ordered_channel_weights = ordered_output_set.channel_weights();
+
+            log::info!("weights: {:?}", ordered_channel_weights);
+
+            assert!(ordered_channel_weights
+                .iter()
+                .zip(ordered_channel_weights.iter().skip(1))
+                .all(|(a, b)| a >= b));
+
+            assert!(perm
+                .iter()
+                .map(|&i| channel_weights[i])
+                .zip(ordered_channel_weights.iter().cloned())
+                .all(|(a, b)| a == b));
+
+            let mut inv_perm = perm.clone();
+
+            for (from, &to) in perm.iter().enumerate() {
+                inv_perm[to] = from;
+            }
+
+            ordered_output_set.permute_channels(inv_perm);
+
+            assert_eq!(output_set, ordered_output_set);
+
+            output_set = output_set.apply_comparator(a, b);
+            log::info!("step {}: size = {}", i, output_set.values().len());
+        }
+
+        log::info!("result: {:?}", output_set);
     }
 }
