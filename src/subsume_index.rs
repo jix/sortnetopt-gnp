@@ -26,6 +26,16 @@ pub struct AbstractedPair<T> {
     pub item: T,
 }
 
+impl<T> AbstractedPair<T> {
+    pub fn new(output_set: OutputSet, item: T) -> Self {
+        Self {
+            abstraction: output_set.abstraction(),
+            output_set,
+            item,
+        }
+    }
+}
+
 pub struct SubsumeIndex<T> {
     trees: Vec<Node<T>>,
     len: usize,
@@ -43,6 +53,10 @@ impl<T: SubsumeIndexItem> Default for SubsumeIndex<T> {
 impl<T: SubsumeIndexItem> SubsumeIndex<T> {
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.trees.is_empty()
     }
 
     pub fn insert(&mut self, pair: AbstractedPair<T>) {
