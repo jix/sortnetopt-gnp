@@ -11,7 +11,7 @@ const MAX_VALUES: usize = 1 << MAX_CHANNELS;
 
 type VVec<T> = arrayvec::ArrayVec<[T; MAX_VALUES]>;
 
-type AVec<T> = arrayvec::ArrayVec<[T; 512]>; // >= MAX_CHANNELS * MAX_CHANNELS * 2
+type AVec<T> = arrayvec::ArrayVec<[T; 512]>;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct OutputSet {
@@ -114,7 +114,9 @@ impl OutputSet {
     }
 
     pub fn abstraction(&self) -> Abstraction {
-        let mut values = (0..self.channels * self.channels * 2)
+        let channel_values_len = Abstraction::channel_values_len(self.channels);
+
+        let mut values = (0..self.channels * channel_values_len)
             .map(|_| 0)
             .collect::<AVec<u16>>();
 
@@ -126,7 +128,9 @@ impl OutputSet {
 
                 let channel_pop_count = pop_count - channel_value;
 
-                values[2 * (self.channels * channel + channel_pop_count) + channel_value] += 1;
+                values[channel_values_len * channel + 2 * channel_pop_count + 2 + channel_value] +=
+                    1;
+                values[channel_values_len * channel + channel_value] += 1;
             }
         }
 
@@ -340,7 +344,7 @@ impl Abstraction {
     pub fn channel_le(&self, my_channel: usize, other: &Abstraction, other_channel: usize) -> bool {
         assert_eq!(self.channels, other.channels);
 
-        let channel_values_len = self.channels * 2;
+        let channel_values_len = Self::channel_values_len(self.channels);
 
         let my_offset = channel_values_len * my_channel;
         let other_offset = channel_values_len * other_channel;
@@ -359,13 +363,18 @@ impl Abstraction {
             return;
         }
 
-        let channel_values_len = self.channels * 2;
+        let channel_values_len = Self::channel_values_len(self.channels);
+
         let a_offset = channel_values_len * a;
         let b_offset = channel_values_len * b;
 
         for i in 0..channel_values_len {
             self.values.swap(a_offset + i, b_offset + i);
         }
+    }
+
+    fn channel_values_len(channels: usize) -> usize {
+        channels * 2 + 2
     }
 }
 
@@ -387,7 +396,10 @@ mod test {
 
     #[test]
     fn avec_capacity() {
-        assert!(AVec::<usize>::new().capacity() >= MAX_CHANNELS * MAX_CHANNELS * 2);
+        assert!(
+            AVec::<usize>::new().capacity()
+                >= MAX_CHANNELS * Abstraction::channel_values_len(MAX_CHANNELS)
+        );
     }
 
     #[rustfmt::skip]
