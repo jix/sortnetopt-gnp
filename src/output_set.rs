@@ -279,6 +279,24 @@ impl OutputSet {
 
         true
     }
+
+    pub fn implications(&self) -> Implications {
+        let all_channel_mask = (1 << self.channels) - 1;
+        let mut implications = (0..self.channels)
+            .map(|_| all_channel_mask)
+            .collect::<CVec<_>>();
+
+        for &value in self.values.iter() {
+            for channel in 0..self.channels {
+                let channel_mask = 1 << channel;
+                if value & channel_mask != 0 {
+                    implications[channel] &= value;
+                }
+            }
+        }
+
+        Implications(implications)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -351,6 +369,18 @@ impl Abstraction {
     }
 }
 
+pub struct Implications(CVec<u16>);
+
+impl Implications {
+    pub fn implies(&self, a: usize, b: usize) -> bool {
+        self.0[a] & (1 << b) != 0
+    }
+
+    pub fn is_associated(&self, a: usize, b: usize) -> bool {
+        self.implies(a, b) | self.implies(b, a)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -378,6 +408,11 @@ mod test {
 
         let mut output_set = OutputSet::all_values(11);
 
+        assert_eq!(
+            output_set.implications().0,
+            (0..11).map(|i| 1 << i).collect::<CVec<_>>()
+        );
+
         for (i, &(a, b)) in SORT_11.iter().enumerate() {
             assert!(!output_set.is_sorted());
             output_set = output_set.apply_comparator(a, b);
@@ -388,6 +423,11 @@ mod test {
 
         assert!(output_set.is_sorted());
         assert_eq!(output_set.values().len(), 12);
+
+        assert_eq!(
+            output_set.implications().0,
+            (0..11).map(|i| (1 << (i + 1)) - 1).collect::<CVec<_>>()
+        );
     }
 
     #[test]
