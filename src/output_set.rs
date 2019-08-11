@@ -1,4 +1,7 @@
-use std::{cmp::min, fmt};
+use std::{
+    cmp::{max, min},
+    fmt,
+};
 
 pub const MAX_CHANNELS: usize = 15;
 
@@ -192,12 +195,160 @@ impl OutputSet {
 
         perm
     }
+
+    pub fn swap_channels(&mut self, a: usize, b: usize) {
+        assert!(a < self.channels && b < self.channels);
+        if a == b {
+            return;
+        }
+
+        let mask_a = 1 << a;
+        let mask_b = 1 << b;
+
+        let mask = mask_a | mask_b;
+
+        let mut keep = VVec::<u16>::new();
+        let mut swap_a = VVec::<u16>::new();
+        let mut swap_b = VVec::<u16>::new();
+
+        for &value in self.values.iter() {
+            if value & mask == mask_a {
+                swap_a.push(value ^ mask);
+            } else if value & mask == mask_b {
+                swap_b.push(value ^ mask);
+            } else {
+                keep.push(value);
+            }
+        }
+
+        swap_a.push(!0);
+        swap_b.push(!0);
+        keep.push(!0);
+
+        self.values.clear();
+
+        let mut swap_a_pos = 0;
+        let mut swap_b_pos = 0;
+        let mut keep_pos = 0;
+
+        loop {
+            let swap_a_value = swap_a[swap_a_pos];
+            let swap_b_value = swap_b[swap_b_pos];
+            let keep_value = keep[keep_pos];
+            let value = min(min(swap_a_value, swap_b_value), keep_value);
+            if value == !0 {
+                break;
+            }
+            self.values.push(value);
+
+            swap_a_pos += (swap_a_value == value) as usize;
+            swap_b_pos += (swap_b_value == value) as usize;
+            keep_pos += (keep_value == value) as usize;
+        }
+    }
+
+    pub fn subsumes(&self, other: &OutputSet) -> bool {
+        if other.values.len() < self.values.len() {
+            return false;
+        }
+
+        let mut slack = other.values.len() - self.values.len();
+
+        let mut other_pos = 0;
+
+        for &value in self.values.iter() {
+            loop {
+                if let Some(&other_value) = other.values.get(other_pos) {
+                    if other_value == value {
+                        other_pos += 1;
+                        break;
+                    } else if other_value > value {
+                        return false;
+                    } else {
+                        if slack == 0 {
+                            return false;
+                        }
+                        slack -= 1;
+                        other_pos += 1;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Abstraction {
     channels: usize,
     values: AVec<u16>,
+}
+
+impl Abstraction {
+    pub fn update_min(&mut self, other: &Abstraction) {
+        assert_eq!(self.channels, other.channels);
+
+        for (my, other) in self.values.iter_mut().zip(other.values.iter()) {
+            *my = min(*my, *other);
+        }
+    }
+
+    pub fn update_max(&mut self, other: &Abstraction) {
+        assert_eq!(self.channels, other.channels);
+
+        for (my, other) in self.values.iter_mut().zip(other.values.iter()) {
+            *my = max(*my, *other);
+        }
+    }
+
+    pub fn values(&self) -> &[u16] {
+        &self.values
+    }
+
+    pub fn largest_range(&self, other: &Abstraction) -> Option<usize> {
+        self.values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(&a, &b)| max(a, b) - min(a, b))
+            .enumerate()
+            .max_by_key(|&(_, range)| range)
+            .filter(|&(_, range)| range > 0)
+            .map(|(index, _)| index)
+    }
+
+    pub fn channel_le(&self, my_channel: usize, other: &Abstraction, other_channel: usize) -> bool {
+        assert_eq!(self.channels, other.channels);
+
+        let channel_values_len = self.channels * 2;
+
+        let my_offset = channel_values_len * my_channel;
+        let other_offset = channel_values_len * other_channel;
+
+        let my_channel_values = &self.values[my_offset..my_offset + channel_values_len];
+        let other_channel_values = &other.values[other_offset..other_offset + channel_values_len];
+
+        my_channel_values
+            .iter()
+            .zip(other_channel_values.iter())
+            .all(|(my, other)| my <= other)
+    }
+
+    pub fn swap_channels(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+
+        let channel_values_len = self.channels * 2;
+        let a_offset = channel_values_len * a;
+        let b_offset = channel_values_len * b;
+
+        for i in 0..channel_values_len {
+            self.values.swap(a_offset + i, b_offset + i);
+        }
+    }
 }
 
 #[cfg(test)]
