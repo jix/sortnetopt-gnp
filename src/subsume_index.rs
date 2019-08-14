@@ -1,4 +1,5 @@
 use arrayvec::ArrayVec;
+use parking_lot::Mutex;
 
 use crate::{
     matching::Matching,
@@ -34,6 +35,33 @@ impl<T> AbstractedPair<T> {
             item,
         }
     }
+    fn mutex_wrap(self) -> AbstractedPair<Mutex<T>> {
+        let Self {
+            abstraction,
+            output_set,
+            item,
+        } = self;
+        AbstractedPair {
+            abstraction,
+            output_set,
+            item: Mutex::new(item),
+        }
+    }
+}
+
+impl<T> AbstractedPair<Mutex<T>> {
+    fn mutex_unwrap(self) -> AbstractedPair<T> {
+        let Self {
+            abstraction,
+            output_set,
+            item,
+        } = self;
+        AbstractedPair {
+            abstraction,
+            output_set,
+            item: item.into_inner(),
+        }
+    }
 }
 
 pub struct SubsumeIndex<T> {
@@ -62,7 +90,7 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
     pub fn insert(&mut self, pair: AbstractedPair<T>) {
         self.combine_with_subsuming(pair).unwrap_or_else(|pair| {
             self.len += 1;
-            self.trees.push(Node::Leaf(pair));
+            self.trees.push(Node::Leaf(pair.mutex_wrap()));
             self.merge_trees(false);
         })
     }
@@ -92,7 +120,7 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
                 return;
             }
 
-            let mut last_tree = self.trees.pop().unwrap();
+            let last_tree = self.trees.pop().unwrap();
 
             self.len -= last_tree.len();
 
@@ -127,7 +155,7 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
 }
 
 enum Node<T> {
-    Leaf(AbstractedPair<T>),
+    Leaf(AbstractedPair<Mutex<T>>),
     Inner {
         abstraction: Abstraction,
         children: Box<[Node<T>; 2]>,
@@ -140,7 +168,7 @@ impl<T: SubsumeIndexItem> Node<T> {
         assert!(!items.is_empty());
         let len = items.len();
         if len == 1 {
-            Node::Leaf(items.pop().unwrap())
+            Node::Leaf(items.pop().unwrap().mutex_wrap())
         } else {
             let mut min_abstraction = items[0].abstraction.clone();
             let mut max_abstraction = min_abstraction.clone();
@@ -184,7 +212,7 @@ impl<T: SubsumeIndexItem> Node<T> {
 
     fn drain_using(self, target: &mut impl FnMut(AbstractedPair<T>)) {
         match self {
-            Node::Leaf(pair) => target(pair),
+            Node::Leaf(pair) => target(pair.mutex_unwrap()),
             Node::Inner { children, .. } => {
                 for child in ArrayVec::from(*children) {
                     child.drain_using(target);
@@ -194,7 +222,7 @@ impl<T: SubsumeIndexItem> Node<T> {
     }
 
     fn combine_with_subsuming(
-        &mut self,
+        &self,
         pair: AbstractedPair<T>,
         mut matching: Matching,
     ) -> Result<(), AbstractedPair<T>> {
@@ -217,7 +245,7 @@ impl<T: SubsumeIndexItem> Node<T> {
     }
 
     fn combine_permuted(
-        node_pair: &mut AbstractedPair<T>,
+        node_pair: &AbstractedPair<Mutex<T>>,
         mut pair: AbstractedPair<T>,
         mut perm: CVec<usize>,
         mut matching: Matching,
@@ -243,7 +271,8 @@ impl<T: SubsumeIndexItem> Node<T> {
 
         if unique_matched == channels {
             if node_pair.output_set.subsumes(&pair.output_set) {
-                node_pair.item.combine(perm, pair.item);
+                let mut item = node_pair.item.lock();
+                item.combine(perm, pair.item);
                 return Ok(());
             }
         } else {
