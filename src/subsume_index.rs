@@ -103,9 +103,8 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
         &mut self,
         mut pair: AbstractedPair<T>,
     ) -> Result<(), AbstractedPair<T>> {
-        let channels = pair.output_set.channels();
         for tree in self.trees.iter_mut() {
-            match tree.combine_with_subsuming(pair, Matching::new(channels)) {
+            match tree.combine_with_subsuming(pair) {
                 Ok(()) => return Ok(()),
                 Err(returned_pair) => pair = returned_pair,
             }
@@ -129,13 +128,12 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
             self.len -= second_last_tree.len();
 
             let mut pairs = vec![];
-            second_last_tree.drain_using(&mut |pair| {
-                let channels = pair.output_set.channels();
-                match last_tree.combine_with_subsuming(pair, Matching::new(channels)) {
+            second_last_tree.drain_using(
+                &mut |pair| match last_tree.combine_with_subsuming(pair) {
                     Ok(()) => (),
                     Err(returned_pair) => pairs.push(returned_pair),
-                }
-            });
+                },
+            );
 
             last_tree.drain_using(&mut |pair| pairs.push(pair));
 
@@ -221,7 +219,12 @@ impl<T: SubsumeIndexItem> Node<T> {
         }
     }
 
-    fn combine_with_subsuming(
+    fn combine_with_subsuming(&self, pair: AbstractedPair<T>) -> Result<(), AbstractedPair<T>> {
+        let channels = pair.output_set.channels();
+        self.combine_with_subsuming_rec(pair, Matching::new(channels))
+    }
+
+    fn combine_with_subsuming_rec(
         &self,
         pair: AbstractedPair<T>,
         mut matching: Matching,
@@ -239,8 +242,8 @@ impl<T: SubsumeIndexItem> Node<T> {
                 Self::combine_permuted(node_pair, pair, perm, matching)
             }
             Node::Inner { children, .. } => children[0]
-                .combine_with_subsuming(pair, matching.clone())
-                .or_else(|pair| children[1].combine_with_subsuming(pair, matching)),
+                .combine_with_subsuming_rec(pair, matching.clone())
+                .or_else(|pair| children[1].combine_with_subsuming_rec(pair, matching)),
         }
     }
 
