@@ -1,12 +1,14 @@
 use arrayvec::ArrayVec;
+use crossbeam::queue::{ArrayQueue, SegQueue};
 use parking_lot::Mutex;
+use rayon::{iter::plumbing, prelude::*};
 
 use crate::{
     matching::Matching,
     output_set::{Abstraction, CVec, OutputSet},
 };
 
-pub trait SubsumeIndexItem {
+pub trait SubsumeIndexItem: Send {
     fn combine(&mut self, perm: CVec<usize>, other: Self);
 }
 
@@ -152,7 +154,7 @@ impl<T: SubsumeIndexItem> SubsumeIndex<T> {
     }
 }
 
-enum Node<T> {
+pub enum Node<T> {
     Leaf(AbstractedPair<Mutex<T>>),
     Inner {
         abstraction: Abstraction,
@@ -162,7 +164,7 @@ enum Node<T> {
 }
 
 impl<T: SubsumeIndexItem> Node<T> {
-    fn new(mut items: Vec<AbstractedPair<T>>) -> Self {
+    pub fn new(mut items: Vec<AbstractedPair<T>>) -> Self {
         assert!(!items.is_empty());
         let len = items.len();
         if len == 1 {
@@ -183,8 +185,7 @@ impl<T: SubsumeIndexItem> Node<T> {
             let items_1 = items.drain(len / 2..).collect::<Vec<_>>();
             let items_0 = items;
 
-            let child_0 = Self::new(items_0);
-            let child_1 = Self::new(items_1);
+            let (child_0, child_1) = rayon::join(|| Self::new(items_0), || Self::new(items_1));
 
             Node::Inner {
                 abstraction: min_abstraction,
@@ -194,7 +195,7 @@ impl<T: SubsumeIndexItem> Node<T> {
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             &Node::Leaf(..) => 1,
             &Node::Inner { len, .. } => len,
@@ -219,7 +220,7 @@ impl<T: SubsumeIndexItem> Node<T> {
         }
     }
 
-    fn combine_with_subsuming(&self, pair: AbstractedPair<T>) -> Result<(), AbstractedPair<T>> {
+    pub fn combine_with_subsuming(&self, pair: AbstractedPair<T>) -> Result<(), AbstractedPair<T>> {
         let channels = pair.output_set.channels();
         self.combine_with_subsuming_rec(pair, Matching::new(channels))
     }
@@ -318,6 +319,186 @@ impl<T: SubsumeIndexItem> Node<T> {
         pair.output_set = orig_output_set;
         Err(pair)
     }
+
+    pub fn minimal_elements(self) -> Vec<AbstractedPair<T>> {
+        match self {
+            Node::Inner { children, .. } => {
+                let [child_0, child_1] = *children;
+
+                let child_0 = Self::new(child_0.minimal_elements());
+
+                let child_1_pairs = child_1
+                    .flat_map(|pair| child_0.combine_with_subsuming(pair).err())
+                    .collect::<Vec<_>>();
+
+                if child_1_pairs.is_empty() {
+                    return child_0.collect::<Vec<_>>();
+                }
+
+                let child_1 = Self::new(child_1_pairs);
+
+                let mut child_0_pairs = child_0
+                    .flat_map(|pair| child_1.combine_with_subsuming(pair).err())
+                    .collect::<Vec<_>>();
+
+                child_0_pairs.extend(child_1.minimal_elements());
+                child_0_pairs
+            }
+            Node::Leaf(pair) => vec![pair.mutex_unwrap()],
+        }
+    }
+}
+
+pub fn incremental_minimal_elements<T, In, G>(
+    inputs: Vec<In>,
+    generator: G,
+) -> Vec<AbstractedPair<T>>
+where
+    T: SubsumeIndexItem,
+    G: Sync + Fn(In) -> Vec<AbstractedPair<T>>,
+    In: Send,
+{
+    let mut node: Option<Node<T>> = None;
+    let mut chunk_size = 1024;
+
+    let input_queue = SegQueue::<In>::new();
+    let spill_queue = SegQueue::<AbstractedPair<T>>::new();
+
+    for input in inputs {
+        input_queue.push(input);
+    }
+
+    while !input_queue.is_empty() || !spill_queue.is_empty() {
+        let output_queue = ArrayQueue::<AbstractedPair<T>>::new(chunk_size);
+
+        rayon::scope(|s| {
+            for _ in 0..rayon::current_num_threads() {
+                s.spawn(|_| {
+                    while let Ok(pair) = spill_queue.pop() {
+                        let res = if let Some(node) = &node {
+                            node.combine_with_subsuming(pair)
+                        } else {
+                            Err(pair)
+                        };
+
+                        if let Err(pair) = res {
+                            if let Err(pair) = output_queue.push(pair) {
+                                spill_queue.push(pair.0);
+                                break;
+                            }
+                        }
+                    }
+
+                    while !output_queue.is_full() {
+                        if let Ok(item) = input_queue.pop() {
+                            for pair in generator(item) {
+                                let res = if let Some(node) = &node {
+                                    node.combine_with_subsuming(pair)
+                                } else {
+                                    Err(pair)
+                                };
+
+                                if let Err(pair) = res {
+                                    if let Err(pair) = output_queue.push(pair) {
+                                        spill_queue.push(pair.0);
+                                    }
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                })
+            }
+        });
+
+        let mut outputs = Vec::with_capacity(chunk_size);
+
+        while let Ok(pair) = output_queue.pop() {
+            outputs.push(pair);
+        }
+
+        if outputs.is_empty() {
+            continue;
+        }
+
+        let node_1 = Node::new(outputs);
+
+        if let Some(node_0) = node {
+            let mut node_0_pairs = node_0
+                .flat_map(|pair| node_1.combine_with_subsuming(pair).err())
+                .collect::<Vec<_>>();
+
+            node_0_pairs.extend(node_1.minimal_elements());
+
+            node = Some(Node::new(node_0_pairs));
+        } else {
+            node = Some(Node::new(node_1.minimal_elements()));
+        }
+        chunk_size *= 2;
+    }
+
+    node.into_par_iter().flatten().collect::<Vec<_>>()
+}
+
+pub struct NodeIter<T> {
+    nodes: Vec<Node<T>>,
+}
+
+impl<T: SubsumeIndexItem> Iterator for NodeIter<T> {
+    type Item = AbstractedPair<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.nodes.pop() {
+            match node {
+                Node::Leaf(pair) => return Some(pair.mutex_unwrap()),
+                Node::Inner { children, .. } => self.nodes.extend(ArrayVec::from(*children)),
+            }
+        }
+
+        None
+    }
+}
+
+impl<T: SubsumeIndexItem> IntoIterator for Node<T> {
+    type Item = AbstractedPair<T>;
+    type IntoIter = NodeIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        NodeIter { nodes: vec![self] }
+    }
+}
+
+impl<T: SubsumeIndexItem> plumbing::UnindexedProducer for Node<T> {
+    type Item = AbstractedPair<T>;
+
+    fn split(self) -> (Self, Option<Self>) {
+        match self {
+            Node::Inner { children, .. } => {
+                let [child_0, child_1] = *children;
+                (child_0, Some(child_1))
+            }
+            node => (node, None),
+        }
+    }
+
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: plumbing::Folder<Self::Item>,
+    {
+        folder.consume_iter(self.into_iter())
+    }
+}
+
+impl<T: SubsumeIndexItem> ParallelIterator for Node<T> {
+    type Item = AbstractedPair<T>;
+
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: plumbing::UnindexedConsumer<Self::Item>,
+    {
+        plumbing::bridge_unindexed(self, consumer)
+    }
 }
 
 #[cfg(test)]
@@ -359,32 +540,23 @@ mod test {
 
             log::info!("initial output sets: {}", some_output_sets.len());
 
-            let mut index = SubsumeIndex::<usize>::default();
+            let abstracted_pairs = some_output_sets
+                .into_iter()
+                .map(|output_set| AbstractedPair::new(output_set, 1))
+                .collect();
 
-            for output_set in some_output_sets.iter() {
-                let pair = AbstractedPair {
-                    abstraction: output_set.abstraction(),
-                    output_set: output_set.clone(),
-                    item: 1,
-                };
+            let minimal = Node::new(abstracted_pairs).minimal_elements();
 
-                index.insert(pair);
-            }
+            log::info!("minimal output sets: {}", minimal.len());
+            assert_eq!(minimal.len(), expected);
 
-            log::info!("index output sets: {}", index.len());
-
-            index.subsume_all();
-
-            log::info!("minimal output sets: {}", index.len());
-            assert_eq!(index.len(), expected);
-
-            index.drain_using(|pair| {
+            for pair in minimal {
                 log::info!(
                     "minimal output set: size = {:?} paths = {}",
                     pair.output_set.values().len(),
                     pair.item
                 );
-            })
+            }
         }
     }
 }
