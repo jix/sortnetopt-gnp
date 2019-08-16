@@ -166,6 +166,20 @@ pub enum Node<T> {
 impl<T: SubsumeIndexItem> Node<T> {
     pub fn new(mut items: Vec<AbstractedPair<T>>) -> Self {
         assert!(!items.is_empty());
+
+        while let Some(last) = items.pop() {
+            if let Some(second_last) = items.last_mut() {
+                if second_last.output_set == last.output_set {
+                    second_last
+                        .item
+                        .combine((0..last.output_set.channels()).collect(), last.item);
+                    continue;
+                }
+            }
+            items.push(last);
+            break;
+        }
+
         let len = items.len();
         if len == 1 {
             Node::Leaf(items.pop().unwrap().mutex_wrap())
