@@ -33,11 +33,16 @@ currently computed layer.
 
 On a scaleway GP1-L instance (32 threads) running this for 9 channels took less
 than 2 hours. The runtime and required memory grow quite fast with the number
-of channels. The next interesting size would be 11 channels. I'm not sure if it
-is feasible to run this for 11 channels, I certainly don't have the resources
-to do so.
+of channels.
+
+On an AMD Ryzen 9 3950X 16-Core Processor (32 threads) at 4.1GHz running this
+for 9 channels takes 44 minutes.
+
+See [jix/sortnetopt][3] for a newer approach that is much faster and unlike
+this also works for 11 channels.
 
 
 [0]: https://doi.org/10.1016/j.jcss.2015.11.014
 [1]: https://doi.org/10.1007/978-3-030-19212-9_19
 [2]: https://www.rust-lang.org/tools/install
+[3]: https://github.com/jix/sortnetopt
