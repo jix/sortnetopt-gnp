@@ -20,6 +20,8 @@ struct Opt {
 fn main() {
     logging::setup();
 
+    rayon::ThreadPoolBuilder::new().stack_size(100 * 1024 * 1024).build_global().unwrap();
+
     let opt = Opt::from_args();
 
     let output_set = OutputSet::all_values(opt.width);
